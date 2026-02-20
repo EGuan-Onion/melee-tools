@@ -1,0 +1,25 @@
+[project]
+name = "melee-tools"
+version = "0.1.0"
+description = "Data analysis toolkit for Super Smash Bros. Melee replay files (.slp)"
+requires-python = ">=3.10"
+dependencies = [
+    "peppi-py",
+    "pandas",
+    "pyarrow",
+    "numpy",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "jupyter",
+    "matplotlib",
+    "seaborn",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
