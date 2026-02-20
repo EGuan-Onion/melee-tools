@@ -1,8 +1,10 @@
 """Melee character and stage ID mappings.
 
-Character IDs = internal character IDs from the .slp format (game start).
-Note: metadata uses *external* character IDs which differ (e.g. Sheik=19 externally but 19 internally too,
-while Zelda=18 externally). The `start.players[i].character` field uses internal IDs.
+Two character ID systems exist in .slp files:
+- Internal IDs: used in game start event (start.players[i].character)
+- External IDs: used in per-frame post data (post.character) and metadata
+
+Use character_name() for internal IDs, character_name_external() for external IDs.
 """
 
 # Internal character IDs (from game start event)
@@ -75,12 +77,55 @@ STAGE_NAMES = {
     32: "Final Destination",
 }
 
+# External character IDs (from per-frame post data and metadata)
+CHARACTER_NAMES_EXTERNAL = {
+    0: "Mario",
+    1: "Fox",
+    2: "Captain Falcon",
+    3: "Donkey Kong",
+    4: "Kirby",
+    5: "Bowser",
+    6: "Link",
+    7: "Sheik",
+    8: "Ness",
+    9: "Peach",
+    10: "Popo",
+    11: "Nana",
+    12: "Pikachu",
+    13: "Samus",
+    14: "Yoshi",
+    15: "Jigglypuff",
+    16: "Mewtwo",
+    17: "Luigi",
+    18: "Marth",
+    19: "Zelda",
+    20: "Young Link",
+    21: "Dr. Mario",
+    22: "Falco",
+    23: "Pichu",
+    24: "Mr. Game & Watch",
+    25: "Ganondorf",
+    26: "Roy",
+    27: "Master Hand",
+    28: "Crazy Hand",
+    29: "Wireframe Male",
+    30: "Wireframe Female",
+    31: "Giga Bowser",
+    32: "Sandbag",
+}
+
 # Competitive stage list
 LEGAL_STAGES = {2, 3, 8, 28, 31, 32}
 
 
 def character_name(char_id: int) -> str:
+    """Resolve internal character ID (from game start) to name."""
     return CHARACTER_NAMES.get(char_id, f"Unknown ({char_id})")
+
+
+def character_name_external(char_id: int) -> str:
+    """Resolve external character ID (from frame data / metadata) to name."""
+    return CHARACTER_NAMES_EXTERNAL.get(char_id, f"Unknown ({char_id})")
 
 
 def stage_name(stage_id: int) -> str:

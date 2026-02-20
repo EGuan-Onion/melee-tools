@@ -7,7 +7,7 @@ import pandas as pd
 import pyarrow as pa
 from peppi_py import read_slippi
 
-from melee_tools.enums import character_name, stage_name
+from melee_tools.enums import character_name, character_name_external, stage_name
 
 
 def _arrow_to_numpy(arr: pa.Array) -> np.ndarray:
@@ -130,7 +130,8 @@ def extract_frames(
             df = df.drop(columns=input_cols)
 
         # Add player context columns
-        df["character_id"] = player.character
+        # Note: start uses internal IDs, frame data uses external IDs
+        df["character_id_internal"] = player.character
         df["character_name"] = character_name(player.character)
 
         players[idx] = df
