@@ -29,5 +29,8 @@ Thumbs.db
 *.slp
 replays/
 
+# Generated outputs
+output/
+
 # Claude
 .claude/

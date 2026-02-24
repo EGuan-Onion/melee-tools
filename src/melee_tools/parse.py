@@ -138,3 +138,43 @@ def parse_directory(
         return pd.DataFrame()
 
     return pd.DataFrame(rows)
+
+
+def parse_replays(
+    root: str | Path,
+    with_stocks: bool = False,
+    real_games_only: bool = True,
+) -> pd.DataFrame:
+    """Recursively parse all .slp files under a root directory.
+
+    Args:
+        root: Root directory to search (walks subdirectories).
+        with_stocks: If True, include end-of-game stock/percent data.
+        real_games_only: If True, filter to RESOLVED/GAME end methods.
+
+    Returns:
+        DataFrame with one row per game.
+    """
+    root = Path(root)
+    parse_fn = parse_game_with_stocks if with_stocks else parse_game
+
+    rows = []
+    errors = []
+    for slp_file in sorted(root.rglob("*.slp")):
+        try:
+            rows.append(parse_fn(slp_file))
+        except Exception as e:
+            errors.append({"filename": slp_file.name, "error": str(e)})
+
+    if errors:
+        print(f"Warning: {len(errors)} file(s) failed to parse:")
+        for err in errors:
+            print(f"  {err['filename']}: {err['error']}")
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    if real_games_only:
+        df = df[df["end_method"].isin(["RESOLVED", "GAME"])].reset_index(drop=True)
+    return df
