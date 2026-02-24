@@ -54,7 +54,7 @@ def detect_combos(
     frames = defender_df["frame"].values.astype(int)
     last_attack = defender_df["last_attack_landed"].values
 
-    def _make_combo(sf, ef, sp, ep, nh, sb, eb, killed):
+    def _make_combo(sf, ef, sp, ep, nh, sb, eb, killed, hit_seq):
         return {
             "start_frame": sf,
             "end_frame": ef,
@@ -65,6 +65,8 @@ def detect_combos(
             "killed": killed,
             "start_pct": round(sp, 1),
             "end_pct": round(ep, 1),
+            "hit_moves": [move_name(mid) for _, mid in hit_seq],
+            "hit_frames": [f for f, _ in hit_seq],
         }
 
     combos = []
@@ -76,6 +78,7 @@ def detect_combos(
     started_by = 0
     ended_by = 0
     current_pct = 0.0
+    hit_sequence = []
 
     # Max frames between last hit and stock loss to attribute as a kill.
     # Blast zone travel can take 100+ frames after the final hit.
@@ -98,8 +101,10 @@ def detect_combos(
                 start_pct = float(pct[i - 1])
                 started_by = move_id
                 num_hits = 1
+                hit_sequence = [(int(frames[i]), move_id)]
             else:
                 num_hits += 1
+                hit_sequence.append((int(frames[i]), move_id))
             ended_by = move_id
             last_hit_frame = int(frames[i])
             current_pct = float(pct[i])
@@ -108,7 +113,7 @@ def detect_combos(
             # Stock lost while combo is still active — clear kill
             combos.append(_make_combo(
                 start_frame, int(frames[i]), start_pct, current_pct,
-                num_hits, started_by, ended_by, True,
+                num_hits, started_by, ended_by, True, hit_sequence,
             ))
             in_combo = False
             continue
@@ -124,7 +129,7 @@ def detect_combos(
         if in_combo and not hit and (int(frames[i]) - last_hit_frame) > gap_frames:
             combos.append(_make_combo(
                 start_frame, last_hit_frame, start_pct, current_pct,
-                num_hits, started_by, ended_by, False,
+                num_hits, started_by, ended_by, False, hit_sequence,
             ))
             in_combo = False
 
@@ -132,7 +137,7 @@ def detect_combos(
     if in_combo:
         combos.append(_make_combo(
             start_frame, last_hit_frame, start_pct, current_pct,
-            num_hits, started_by, ended_by, False,
+            num_hits, started_by, ended_by, False, hit_sequence,
         ))
 
     return pd.DataFrame(combos)

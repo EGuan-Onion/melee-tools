@@ -28,5 +28,14 @@ from melee_tools.query import (
     next_action_after,
     post_state_actions,
 )
+from melee_tools.aliases import resolve_character, resolve_move, resolve_move_sequence
+from melee_tools.clips import (
+    export_dolphin_json,
+    find_edgeguards,
+    find_kills_by_move,
+    find_move_sequences,
+    find_tech_chases,
+)
 from melee_tools.plotting import bucket_percent, compute_option_frequencies, plot_options_by_percent
+from melee_tools.stages import STAGE_GEOMETRY
 from melee_tools.stats import game_stats, game_stats_directory
