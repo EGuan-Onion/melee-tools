@@ -151,6 +151,75 @@ def compute_damage_dealt(game, num_players: int) -> dict[int, float]:
     return {k: round(v, 1) for k, v in damage_dealt.items()}
 
 
+_BUTTON_MASKS = {
+    "A": 0x0100,
+    "B": 0x0200,
+    "X": 0x0400,
+    "Y": 0x0800,
+    "Z": 0x0010,
+    "L_digital": 0x0040,
+    "R_digital": 0x0020,
+    "dpad_up": 0x0008,
+    "dpad_down": 0x0004,
+    "dpad_left": 0x0001,
+    "dpad_right": 0x0002,
+}
+
+_COMPASS_LABELS = [
+    "joy_E", "joy_ENE", "joy_NE", "joy_NNE",
+    "joy_N", "joy_NNW", "joy_NW", "joy_WNW",
+    "joy_W", "joy_WSW", "joy_SW", "joy_SSW",
+    "joy_S", "joy_SSE", "joy_SE", "joy_ESE",
+]
+
+
+def compute_button_presses(game, player_index: int) -> dict:
+    """Count rising-edge button presses for one player.
+
+    Tracks digital buttons, analog triggers (>0.5 threshold),
+    and joystick directions (16 compass bins, deadzone 0.3).
+    """
+    pre = game.frames.ports[player_index].leader.pre
+
+    buttons = _arrow_to_numpy(pre.buttons_physical).astype(np.int64)
+    counts = {}
+
+    # Digital buttons — rising edge detection
+    for name, mask in _BUTTON_MASKS.items():
+        pressed = (buttons & mask) != 0
+        counts[name] = int(np.sum(pressed[1:] & ~pressed[:-1]))
+
+    # Soft triggers — rising edge on analog > 0.5
+    if pre.triggers_physical is not None:
+        for side, arr in [("soft_L", pre.triggers_physical.l), ("soft_R", pre.triggers_physical.r)]:
+            vals = _arrow_to_numpy(arr).astype(float)
+            active = vals > 0.5
+            counts[side] = int(np.sum(active[1:] & ~active[:-1]))
+
+    # Joystick directions — 16 compass bins, deadzone 0.3
+    joy_x = _arrow_to_numpy(pre.joystick.x).astype(float)
+    joy_y = _arrow_to_numpy(pre.joystick.y).astype(float)
+    magnitude = np.sqrt(joy_x ** 2 + joy_y ** 2)
+    outside = magnitude > 0.3
+
+    # Rising edge = transition from inside deadzone to outside
+    entering = outside[1:] & ~outside[:-1]
+    entering_indices = np.where(entering)[0] + 1  # +1 because diff shifts by 1
+
+    # Initialize all compass counts to 0
+    for label in _COMPASS_LABELS:
+        counts[label] = 0
+
+    if len(entering_indices) > 0:
+        angles = np.degrees(np.arctan2(joy_y[entering_indices], joy_x[entering_indices]))
+        # Round to nearest 22.5° and map to bin index (0–15)
+        bins = np.round(angles / 22.5).astype(int) % 16
+        for b in bins:
+            counts[_COMPASS_LABELS[b]] += 1
+
+    return counts
+
+
 def game_stats(filepath: str | Path) -> dict:
     """Compute comprehensive stats for a single game.
 
@@ -161,6 +230,7 @@ def game_stats(filepath: str | Path) -> dict:
 
     from melee_tools.parse import parse_game
     info = parse_game(filepath)
+    info["duration_minutes"] = round(info["duration_frames"] / 3600, 4) if info.get("duration_frames") else None
 
     num_players = info["num_players"]
     damage_dealt = compute_damage_dealt(game, num_players)
@@ -169,6 +239,10 @@ def game_stats(filepath: str | Path) -> dict:
         prefix = f"p{idx}"
         pstats = compute_player_stats(game, idx)
         stock_events = compute_stock_events(game, idx)
+        btn = compute_button_presses(game, idx)
+
+        for key, val in btn.items():
+            info[f"{prefix}_btn_{key}"] = val
 
         info[f"{prefix}_damage_dealt"] = damage_dealt[idx]
         info[f"{prefix}_damage_received"] = pstats["damage_received"]
