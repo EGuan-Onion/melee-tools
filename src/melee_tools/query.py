@@ -105,8 +105,14 @@ BLASTZONE_MAP = {
 }
 
 
-def find_kills(df: pd.DataFrame) -> pd.DataFrame:
+def find_kills(df: pd.DataFrame, attacker_df: pd.DataFrame | None = None) -> pd.DataFrame:
     """Find all stock loss events for a player.
+
+    Args:
+        df: Victim's frame DataFrame.
+        attacker_df: Attacker's frame DataFrame. If provided, killing_move is
+            read from the attacker's last_attack_landed (correct). If None,
+            killing_move is read from the victim's field (may be inaccurate).
 
     Returns DataFrame with one row per death:
         frame, death_percent, death_state, blastzone, killing_move_id, killing_move,
@@ -116,13 +122,29 @@ def find_kills(df: pd.DataFrame) -> pd.DataFrame:
     diffs = np.diff(stocks)
     death_indices = np.where(diffs < 0)[0]
 
+    # Build attacker frame lookup if available
+    _atk_lal_map = None
+    if attacker_df is not None:
+        atk_frames = attacker_df["frame"].values.astype(int)
+        atk_lal = attacker_df["last_attack_landed"].values
+        _atk_lal_map = dict(zip(atk_frames, atk_lal))
+
     rows = []
     for di in death_indices:
         pre_death = df.iloc[di]       # last frame alive
         post_death = df.iloc[di + 1] if di + 1 < len(df) else pre_death
 
         death_state = int(post_death["state"]) if not pd.isna(post_death["state"]) else None
-        move_id = int(pre_death["last_attack_landed"]) if not pd.isna(pre_death["last_attack_landed"]) else None
+
+        # Get killing move from attacker if available, else fall back to victim's field
+        move_id = None
+        if _atk_lal_map is not None:
+            atk_val = _atk_lal_map.get(int(pre_death["frame"]))
+            if atk_val is not None and not pd.isna(atk_val):
+                move_id = int(atk_val)
+        if move_id is None:
+            val = pre_death["last_attack_landed"]
+            move_id = int(val) if not pd.isna(val) else None
 
         rows.append({
             "frame": int(pre_death["frame"]),

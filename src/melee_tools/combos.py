@@ -40,9 +40,9 @@ def detect_combos(
     ``gap_frames`` pass with no new hit, or the defender loses a stock.
 
     Args:
-        attacker_df: Attacker's frame DataFrame (unused currently, reserved).
-        defender_df: Defender's frame DataFrame with percent, stocks,
-            last_attack_landed, and frame columns.
+        attacker_df: Attacker's frame DataFrame (used for last_attack_landed).
+        defender_df: Defender's frame DataFrame with percent, stocks, and
+            frame columns.
         gap_frames: Max idle frames between hits before ending a combo.
 
     Returns:
@@ -52,7 +52,13 @@ def detect_combos(
     pct = defender_df["percent"].values.astype(float)
     stocks = defender_df["stocks"].values.astype(float)
     frames = defender_df["frame"].values.astype(int)
-    last_attack = defender_df["last_attack_landed"].values
+
+    # last_attack_landed means "last attack THIS player landed on someone",
+    # so we must read it from the attacker's frames, not the defender's.
+    # Build a frame-aligned lookup from attacker_df.
+    atk_frames = attacker_df["frame"].values.astype(int)
+    atk_lal = attacker_df["last_attack_landed"].values
+    _atk_lal_map = dict(zip(atk_frames, atk_lal))
 
     def _make_combo(sf, ef, sp, ep, nh, sb, eb, killed, hit_seq):
         return {
@@ -94,7 +100,8 @@ def detect_combos(
                       and stocks[i] < stocks[i - 1])
 
         if hit:
-            move_id = int(last_attack[i]) if not pd.isna(last_attack[i]) else 0
+            atk_val = _atk_lal_map.get(int(frames[i]))
+            move_id = int(atk_val) if atk_val is not None and not pd.isna(atk_val) else 0
             if not in_combo:
                 in_combo = True
                 start_frame = int(frames[i])

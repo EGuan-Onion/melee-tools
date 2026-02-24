@@ -264,9 +264,9 @@ def find_kills_by_move(
 
         if as_attacker:
             # Kills on the opponent = deaths of the opponent
-            kills_df = find_kills(opp_df)
+            kills_df = find_kills(opp_df, attacker_df=my_df)
         else:
-            kills_df = find_kills(my_df)
+            kills_df = find_kills(my_df, attacker_df=opp_df)
 
         if len(kills_df) == 0:
             continue
