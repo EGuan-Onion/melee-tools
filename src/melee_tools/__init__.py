@@ -6,7 +6,14 @@ from melee_tools.action_states import (
     ACTION_STATES,
     FRIENDLY_NAMES,
 )
-from melee_tools.combos import analyze_combos, detect_combos, detect_combos_by_strictness
+from melee_tools.combos import (
+    analyze_combos,
+    detect_combos,
+    detect_combos_by_strictness,
+    kill_finishers,
+    move_followups,
+    move_setups,
+)
 from melee_tools.enums import (
     CHARACTER_NAMES,
     CHARACTER_NAMES_EXTERNAL,
@@ -16,7 +23,12 @@ from melee_tools.enums import (
     stage_name,
 )
 from melee_tools.frames import extract_all_players_frames, extract_frames, extract_player_frames
-from melee_tools.habits import analyze_knockdowns, analyze_rolls, classify_direction
+from melee_tools.habits import (
+    analyze_knockdowns,
+    analyze_neutral_attacks,
+    analyze_rolls,
+    classify_direction,
+)
 from melee_tools.moves import MOVE_NAMES, move_name
 from melee_tools.parse import parse_directory, parse_game, parse_game_with_stocks, parse_replays
 from melee_tools.players import player_games
@@ -36,6 +48,12 @@ from melee_tools.clips import (
     find_move_sequences,
     find_tech_chases,
 )
-from melee_tools.plotting import bucket_percent, compute_option_frequencies, plot_options_by_percent
+from melee_tools.plotting import (
+    add_pct_buckets,
+    bucket_percent,
+    compute_option_frequencies,
+    plot_moves_by_bucket,
+    plot_options_by_percent,
+)
 from melee_tools.stages import STAGE_GEOMETRY
 from melee_tools.stats import game_stats, game_stats_directory

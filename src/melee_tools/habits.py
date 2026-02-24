@@ -278,3 +278,110 @@ def analyze_knockdowns(
                 break
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Neutral attack detection (hits + whiffs)
+# ---------------------------------------------------------------------------
+
+# Map action state category name -> display name (matches moves.py MOVE_NAMES)
+_ATTACK_CAT_TO_MOVE = {
+    "jab": "Jab",
+    "dash_attack": "Dash Attack",
+    "ftilt": "F-tilt",
+    "utilt": "U-tilt",
+    "dtilt": "D-tilt",
+    "fsmash": "F-smash",
+    "usmash": "U-smash",
+    "dsmash": "D-smash",
+    "nair": "Nair",
+    "fair": "Fair",
+    "bair": "Bair",
+    "uair": "Uair",
+    "dair": "Dair",
+}
+
+
+def analyze_neutral_attacks(
+    replay_root: str | Path,
+    pg: pd.DataFrame,
+    tag: str,
+    character: str | None = None,
+    hit_window: int = 30,
+) -> pd.DataFrame:
+    """Detect all attack uses (hits and whiffs) across 1v1 replays.
+
+    Unlike analyze_combos() which only captures hits, this function detects
+    every time the player enters an attack animation and records whether it
+    connected within hit_window frames.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag.
+        character: Optional character filter.
+        hit_window: Frames after attack entry to check for a hit (last_attack_landed
+            change on the attacker). Default 30 (~0.5 sec).
+
+    Returns:
+        DataFrame with columns:
+            move       — attack name (e.g. "Fair", "Nair")
+            hit        — True if the attack connected
+            opp_pct    — opponent's percent when the attack started
+            frame      — game frame of the attack entry
+            filename   — source .slp filename
+            character  — player's character
+
+    Example:
+        attacks = analyze_neutral_attacks("replays", pg, "EG＃0", character="Captain Falcon")
+        attacks = add_pct_buckets(attacks, pct_col="opp_pct")
+        plot_moves_by_bucket(attacks, title="Falcon Neutral Attacks by %")
+    """
+    from melee_tools.action_states import ACTION_STATE_CATEGORIES
+
+    # Build state -> category lookup (only for attack categories)
+    state_to_cat: dict[int, str] = {}
+    for cat in _ATTACK_CAT_TO_MOVE:
+        for s in ACTION_STATE_CATEGORIES[cat]:
+            state_to_cat[s] = cat
+
+    rows = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
+        my_states = my_df["state"].values
+        my_frames = my_df["frame"].values.astype(int)
+        my_lal = my_df["last_attack_landed"].values
+        opp_pct_arr = opp_df["percent"].values.astype(float)
+        opp_frames_arr = opp_df["frame"].values.astype(int)
+        fname = gi["filename"]
+
+        opp_pct_map = dict(zip(opp_frames_arr, opp_pct_arr))
+
+        for i in range(1, len(my_states)):
+            s = int(my_states[i]) if not pd.isna(my_states[i]) else 0
+            prev_s = int(my_states[i - 1]) if not pd.isna(my_states[i - 1]) else 0
+            cat = state_to_cat.get(s)
+            if cat is None or state_to_cat.get(prev_s) == cat:
+                continue  # not an attack state entry
+
+            frame = int(my_frames[i])
+            cur_lal = my_lal[i] if not pd.isna(my_lal[i]) else 0
+            opp_pct = opp_pct_map.get(frame, np.nan)
+
+            # Hit = last_attack_landed changes within hit_window frames
+            hit = False
+            for j in range(i + 1, min(i + hit_window + 1, len(my_frames))):
+                jlal = my_lal[j] if not pd.isna(my_lal[j]) else 0
+                if jlal != cur_lal and jlal != 0:
+                    hit = True
+                    break
+
+            rows.append({
+                "move": _ATTACK_CAT_TO_MOVE[cat],
+                "hit": hit,
+                "opp_pct": float(opp_pct) if not np.isnan(opp_pct) else np.nan,
+                "frame": frame,
+                "filename": fname,
+                "character": char_name,
+            })
+
+    return pd.DataFrame(rows)

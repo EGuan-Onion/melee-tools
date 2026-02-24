@@ -211,3 +211,66 @@ def analyze_combos(
         return pd.DataFrame()
 
     return pd.concat(all_combos, ignore_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Combo sequence analysis helpers
+# ---------------------------------------------------------------------------
+
+def move_followups(combos: pd.DataFrame, move: str) -> pd.Series:
+    """Count what moves follow `move` in combo hit sequences.
+
+    Args:
+        combos: DataFrame from detect_combos() or analyze_combos().
+        move: Move name to look up (e.g. "D-throw", "F-tilt").
+
+    Returns:
+        Series of counts, sorted descending.
+
+    Example:
+        combos = analyze_combos("replays", pg, "EG＃0", character="Sheik")
+        move_followups(combos, "D-throw")
+    """
+    from collections import Counter
+    counts = Counter()
+    for moves in combos["hit_moves"]:
+        for i, m in enumerate(moves):
+            if m == move and i + 1 < len(moves):
+                counts[moves[i + 1]] += 1
+    return pd.Series(counts).sort_values(ascending=False)
+
+
+def move_setups(combos: pd.DataFrame, move: str) -> pd.Series:
+    """Count what moves precede `move` in combo hit sequences.
+
+    Args:
+        combos: DataFrame from detect_combos() or analyze_combos().
+        move: Move name to look up (e.g. "U-smash", "Fair").
+
+    Returns:
+        Series of counts, sorted descending.
+    """
+    from collections import Counter
+    counts = Counter()
+    for moves in combos["hit_moves"]:
+        for i, m in enumerate(moves):
+            if m == move and i > 0:
+                counts[moves[i - 1]] += 1
+    return pd.Series(counts).sort_values(ascending=False)
+
+
+def kill_finishers(combos: pd.DataFrame) -> pd.Series:
+    """Count the final move of all kill combos.
+
+    Args:
+        combos: DataFrame from detect_combos() or analyze_combos().
+
+    Returns:
+        Series of counts, sorted descending.
+    """
+    from collections import Counter
+    kills = combos[combos["killed"] == True]
+    counts = Counter(
+        moves[-1] for moves in kills["hit_moves"] if moves
+    )
+    return pd.Series(counts).sort_values(ascending=False)
