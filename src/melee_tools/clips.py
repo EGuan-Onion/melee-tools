@@ -596,3 +596,256 @@ def find_tech_chases(
             ))
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Pattern finder: confirmed events (trigger → outcome)
+# ---------------------------------------------------------------------------
+
+def find_confirmed_events(
+    replay_root: str | Path,
+    pg: pd.DataFrame,
+    tag: str,
+    trigger: str | set,
+    outcome: str | None = "kill",
+    window_frames: int = 300,
+    character: str | None = None,
+    min_opp_pct: float | None = None,
+    as_attacker: bool = True,
+) -> pd.DataFrame:
+    """Find instances where a trigger event is (or isn't) followed by an outcome.
+
+    Trigger types (resolved automatically from the trigger argument):
+    - **Move trigger** (str alias like "stomp", "knee"):
+      fires when a hit is attributed to that move (reactor percent increases
+      and attacker's last_attack_landed == move_id). Correctly handles
+      back-to-back hits with the same move (e.g. stomp → stomp).
+    - **State trigger** (str matching an ACTION_STATE_CATEGORIES key, or a
+      set[int] of raw action state IDs): fires on state *entry*. Useful for
+      throw states (grab, dthrow, uthrow) where the action begins before the
+      hit lands.
+
+    Outcome types:
+    - ``"kill"``  — reactor loses a stock within window_frames.
+    - Move alias string — that move lands within window_frames.
+    - ``None`` — no outcome filter; every trigger is returned as converted=True.
+
+    All returned rows use the standard clip schema, so results can be passed
+    directly to export_dolphin_json() for watchback.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag.
+        trigger: Move alias, ACTION_STATE_CATEGORIES key, or set[int].
+        outcome: "kill", move alias string, or None.
+        window_frames: Max frames after trigger to look for outcome (default 300 = 5 sec).
+        character: Optional character filter (supports aliases).
+        min_opp_pct: Only include triggers where reactor's percent >= this value.
+        as_attacker: If True, this player performs the trigger. If False,
+            the opponent performs the trigger and this player is the reactor.
+
+    Returns:
+        Clip DataFrame with standardized schema. Each row also has a top-level
+        ``converted`` column (bool) for easy filtering.
+        metadata includes: trigger_type, trigger_label, trigger_frame,
+        outcome_type, outcome_frame, converted, opp_pct_at_trigger.
+
+    Examples:
+        # D-throw kill confirm rate (Sheik, opponent at kill %)
+        clips = find_confirmed_events(
+            root, pg, TAG, trigger="throw_down", outcome="kill",
+            character="sheik", min_opp_pct=80,
+        )
+        print(clips["converted"].mean())
+
+        # Stomp → stomp (Falcon Dair → Dair within 1.5 sec)
+        clips = find_confirmed_events(
+            root, pg, TAG, trigger="stomp", outcome="stomp",
+            window_frames=90, character="falcon",
+        )
+
+        # All knees that connected, exported for Dolphin watchback
+        clips = find_confirmed_events(
+            root, pg, TAG, trigger="knee", outcome=None, character="falcon",
+        )
+        export_dolphin_json(clips, "all_knees.json")
+
+        # Moves that kill me (opponent as attacker)
+        clips = find_confirmed_events(
+            root, pg, TAG, trigger="fair", outcome="kill", as_attacker=False,
+        )
+    """
+    from melee_tools.action_states import ACTION_STATE_CATEGORIES
+    from melee_tools.aliases import resolve_character, resolve_move
+    from melee_tools.moves import move_name as _move_name
+
+    # --- Resolve character ---
+    char_filter = None
+    if character:
+        try:
+            chars = resolve_character(character)
+            char_filter = chars[0] if len(chars) == 1 else None
+        except ValueError:
+            char_filter = character
+
+    # --- Resolve trigger ---
+    trigger_move_id = None
+    trigger_states = None
+    trigger_type = None
+
+    if isinstance(trigger, set):
+        trigger_states = trigger
+        trigger_type = "state"
+        trigger_label = f"state({len(trigger)} ids)"
+    else:
+        resolved = resolve_move(trigger, character=char_filter)
+        if resolved is not None:
+            trigger_move_id = resolved
+            trigger_type = "move"
+            trigger_label = _move_name(trigger_move_id)
+        else:
+            cat_states = ACTION_STATE_CATEGORIES.get(trigger)
+            if cat_states:
+                trigger_states = cat_states
+                trigger_type = "state"
+                trigger_label = trigger
+            else:
+                raise ValueError(
+                    f"Cannot resolve trigger {trigger!r}: not a known move alias "
+                    f"or ACTION_STATE_CATEGORIES key. "
+                    f"Available state categories: {sorted(ACTION_STATE_CATEGORIES.keys())}"
+                )
+
+    # --- Resolve outcome ---
+    outcome_move_id = None
+    if outcome is not None and outcome != "kill":
+        outcome_move_id = resolve_move(outcome, character=char_filter)
+        if outcome_move_id is None:
+            raise ValueError(f"Cannot resolve outcome move: {outcome!r}")
+        outcome_label = _move_name(outcome_move_id)
+    elif outcome == "kill":
+        outcome_label = "kill"
+    else:
+        outcome_label = "any"
+
+    rows = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, char_filter):
+        opp_char = opp_df["character_name"].iloc[0]
+        filepath = gi["filepath"]
+
+        actor_df   = my_df  if as_attacker else opp_df
+        reactor_df = opp_df if as_attacker else my_df
+
+        actor_frames_arr  = actor_df["frame"].values.astype(int)
+        actor_lal_arr     = actor_df["last_attack_landed"].values
+        actor_states_arr  = actor_df["state"].values
+        actor_lal_map     = dict(zip(actor_frames_arr, actor_lal_arr))
+
+        reactor_pct_arr    = reactor_df["percent"].values.astype(float)
+        reactor_stocks_arr = reactor_df["stocks"].values.astype(float)
+        reactor_frames_arr = reactor_df["frame"].values.astype(int)
+
+        # --- Find trigger events: list of (index, trigger_frame) ---
+        trigger_events = []
+
+        if trigger_type == "move":
+            # Hit-based: reactor percent increases attributed to trigger_move_id
+            for j in range(1, len(reactor_pct_arr)):
+                if (not np.isnan(reactor_pct_arr[j])
+                        and not np.isnan(reactor_pct_arr[j - 1])
+                        and reactor_pct_arr[j] > reactor_pct_arr[j - 1]
+                        and not np.isnan(reactor_stocks_arr[j])
+                        and reactor_stocks_arr[j] == reactor_stocks_arr[j - 1]):
+                    frame = int(reactor_frames_arr[j])
+                    lal_val = actor_lal_map.get(frame)
+                    mid = int(lal_val) if lal_val is not None and not pd.isna(lal_val) else 0
+                    if mid == trigger_move_id:
+                        trigger_events.append((j, frame))
+
+        elif trigger_type == "state":
+            # State entry-based: actor enters one of trigger_states
+            for i in range(1, len(actor_states_arr)):
+                s    = int(actor_states_arr[i])     if not pd.isna(actor_states_arr[i])     else 0
+                prev = int(actor_states_arr[i - 1]) if not pd.isna(actor_states_arr[i - 1]) else 0
+                if s in trigger_states and prev not in trigger_states:
+                    trigger_events.append((i, int(actor_frames_arr[i])))
+
+        # --- For each trigger, check outcome ---
+        for _, trigger_frame in trigger_events:
+            r_idx = int(np.searchsorted(reactor_frames_arr, trigger_frame))
+            if r_idx >= len(reactor_frames_arr):
+                continue
+
+            # For move triggers the reactor pct has already increased; use r_idx-1 for pre-hit pct
+            pct_ref = max(0, r_idx - 1) if trigger_type == "move" else r_idx
+            opp_pct_at = float(reactor_pct_arr[pct_ref]) if not np.isnan(reactor_pct_arr[pct_ref]) else 0.0
+            opp_stock_at = float(reactor_stocks_arr[r_idx]) if not np.isnan(reactor_stocks_arr[r_idx]) else 4.0
+
+            if min_opp_pct is not None and opp_pct_at < min_opp_pct:
+                continue
+
+            converted = False
+            outcome_frame = None
+
+            if outcome is None:
+                converted = True
+
+            elif outcome == "kill":
+                start_r = int(np.searchsorted(reactor_frames_arr, trigger_frame + 1))
+                for k in range(start_r, len(reactor_frames_arr)):
+                    if reactor_frames_arr[k] > trigger_frame + window_frames:
+                        break
+                    if (not np.isnan(reactor_stocks_arr[k])
+                            and reactor_stocks_arr[k] < opp_stock_at):
+                        converted = True
+                        outcome_frame = int(reactor_frames_arr[k])
+                        break
+
+            else:
+                # outcome_move_id: look for that move hitting the reactor within window
+                start_r = int(np.searchsorted(reactor_frames_arr, trigger_frame + 1))
+                for k in range(start_r, len(reactor_pct_arr)):
+                    rf = int(reactor_frames_arr[k])
+                    if rf > trigger_frame + window_frames:
+                        break
+                    if (not np.isnan(reactor_pct_arr[k])
+                            and not np.isnan(reactor_pct_arr[k - 1])
+                            and reactor_pct_arr[k] > reactor_pct_arr[k - 1]
+                            and not np.isnan(reactor_stocks_arr[k])
+                            and reactor_stocks_arr[k] == reactor_stocks_arr[k - 1]):
+                        lal_val = actor_lal_map.get(rf)
+                        mid = int(lal_val) if lal_val is not None and not pd.isna(lal_val) else 0
+                        if mid == outcome_move_id:
+                            converted = True
+                            outcome_frame = rf
+                            break
+
+            desc = (
+                f"{trigger_label} → {outcome_label}"
+                f" {'✓' if converted else '✗'}"
+                f" (opp {opp_pct_at:.0f}%)"
+            )
+
+            row = _clip_row(
+                filepath=filepath,
+                start_frame=trigger_frame,
+                end_frame=outcome_frame if outcome_frame is not None else trigger_frame + min(window_frames, 120),
+                character=char_name,
+                opp_character=opp_char,
+                pattern_type="confirmed_event",
+                description=desc,
+                metadata={
+                    "trigger_type": trigger_type,
+                    "trigger_label": trigger_label,
+                    "trigger_frame": trigger_frame,
+                    "outcome_type": outcome_label,
+                    "outcome_frame": outcome_frame,
+                    "converted": converted,
+                    "opp_pct_at_trigger": opp_pct_at,
+                },
+            )
+            row["converted"] = converted
+            rows.append(row)
+
+    return pd.DataFrame(rows)

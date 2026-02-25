@@ -44,8 +44,8 @@ class HitboxInfo:
 # Keyed by canonical character name -> move_id -> HitboxInfo.
 MOVE_HITBOXES: dict[str, dict[int, HitboxInfo]] = {
     "Captain Falcon": {
-        14: HitboxInfo("sweetspot", "sourspot", 18.0, 6.0, 12.0, "Knee. Huge gap."),
-        16: HitboxInfo("clean", "late", 13.0, 10.0, 11.5, "Small gap, lower confidence."),
+        14: HitboxInfo("sweetspot", "sourspot", 18.0, 6.0, 12.0, "Knee. Sweetspot sends horizontal, sourspot floats up."),
+        17: HitboxInfo("spike", "nipple spike", 15.0, 10.0, 12.5, "Dair. True spike vs nipple spike (sends forward ~45 deg)."),
     },
     "Marth": {
         14: HitboxInfo("tipper", "non-tipper", 13.0, 9.0, 11.0),
