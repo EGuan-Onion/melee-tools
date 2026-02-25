@@ -203,6 +203,8 @@ def analyze_combos(
 
         if len(combos) > 0:
             combos["character"] = char_name
+            combos["opp_character"] = opp_df["character_name"].iloc[0] if as_attacker else my_df["character_name"].iloc[0]
+            combos["stage"] = gi.get("stage_name", "Unknown")
             combos["filename"] = gi["filename"]
             combos["gap_frames"] = gap_frames
             all_combos.append(combos)
@@ -211,6 +213,66 @@ def analyze_combos(
         return pd.DataFrame()
 
     return pd.concat(all_combos, ignore_index=True)
+
+
+def analyze_kills(
+    replay_root: str | Path,
+    pg: pd.DataFrame,
+    tag: str,
+    character: str | None = None,
+    as_attacker: bool = True,
+) -> pd.DataFrame:
+    """Find all kill or death events for a player across 1v1 replays.
+
+    Wraps query.find_kills() with tag-based player filtering, so it
+    correctly identifies your kills/deaths even in mirror matchups.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag to filter on.
+        character: Optional character filter.
+        as_attacker: If True, return kills this player dealt (opponent
+            deaths). If False, return this player's deaths.
+
+    Returns:
+        DataFrame with all columns from find_kills() plus:
+        character, opp_character, filename.
+
+    Example:
+        # Kills I dealt as Falcon
+        kills = analyze_kills("replays", pg, "EG＃0", character="Falcon")
+        kills.groupby("killing_move")["death_percent"].describe()
+
+        # How I die as Sheik
+        deaths = analyze_kills("replays", pg, "EG＃0", character="Sheik", as_attacker=False)
+        deaths["killing_move"].value_counts()
+    """
+    from melee_tools.habits import _iter_1v1_games
+    from melee_tools.query import find_kills
+
+    all_kills = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
+        opp_char = opp_df["character_name"].iloc[0]
+
+        if as_attacker:
+            kills = find_kills(opp_df, attacker_df=my_df)
+        else:
+            kills = find_kills(my_df, attacker_df=opp_df)
+
+        if len(kills) == 0:
+            continue
+
+        kills = kills.copy()
+        kills["character"] = char_name
+        kills["opp_character"] = opp_char
+        kills["filename"] = gi["filename"]
+        all_kills.append(kills)
+
+    if not all_kills:
+        return pd.DataFrame()
+
+    return pd.concat(all_kills, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------

@@ -281,6 +281,76 @@ def analyze_knockdowns(
 
 
 # ---------------------------------------------------------------------------
+# Hits taken (opponent hits on this player)
+# ---------------------------------------------------------------------------
+
+def analyze_hits_taken(
+    replay_root: str | Path,
+    pg: pd.DataFrame,
+    tag: str,
+    character: str | None = None,
+) -> pd.DataFrame:
+    """Detect all hits the opponent lands on this player across 1v1 replays.
+
+    Symmetric to find_move_hits() but from the victim's perspective:
+    scans for frames where the player's percent increases, then reads the
+    opponent's last_attack_landed to identify the move.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag.
+        character: Optional character filter.
+
+    Returns:
+        DataFrame with columns: move, move_id, damage, my_pct,
+        frame, filename, character, opp_character.
+
+    Example:
+        hits = analyze_hits_taken("replays", pg, "EG＃0", character="Sheik")
+        hits.groupby(["opp_character", "move"]).agg(
+            count=("damage", "count"), avg_dmg=("damage", "mean")
+        ).sort_values("count", ascending=False)
+    """
+    from melee_tools.moves import move_name
+
+    rows = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
+        my_pct = my_df["percent"].values.astype(float)
+        my_stocks = my_df["stocks"].values.astype(float)
+        my_frames = my_df["frame"].values.astype(int)
+
+        opp_lal = opp_df["last_attack_landed"].values
+        opp_frames = opp_df["frame"].values.astype(int)
+        opp_lal_map = dict(zip(opp_frames, opp_lal))
+        opp_char = opp_df["character_name"].iloc[0]
+        fname = gi["filename"]
+
+        for j in range(1, len(my_pct)):
+            if my_pct[j] > my_pct[j - 1] and my_stocks[j] == my_stocks[j - 1]:
+                frame = int(my_frames[j])
+                damage = round(round(my_pct[j], 1) - round(my_pct[j - 1], 1), 1)
+                lal_val = opp_lal_map.get(frame)
+                if lal_val is None or pd.isna(lal_val):
+                    continue
+                mid = int(lal_val)
+                if mid == 0:
+                    continue
+                rows.append({
+                    "move": move_name(mid),
+                    "move_id": mid,
+                    "damage": damage,
+                    "my_pct": round(my_pct[j - 1], 1),
+                    "frame": frame,
+                    "filename": fname,
+                    "character": char_name,
+                    "opp_character": opp_char,
+                })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
 # Neutral attack detection (hits + whiffs)
 # ---------------------------------------------------------------------------
 

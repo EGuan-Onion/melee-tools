@@ -269,7 +269,7 @@ def game_stats_directory(directory: str | Path) -> pd.DataFrame:
     rows = []
     errors = []
 
-    for slp_file in sorted(directory.glob("*.slp")):
+    for slp_file in sorted(directory.rglob("*.slp")):
         try:
             rows.append(game_stats(slp_file))
         except Exception as e:
