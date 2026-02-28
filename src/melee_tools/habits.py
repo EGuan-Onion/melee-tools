@@ -19,93 +19,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from melee_tools.frames import extract_frames
-
-
-# ---------------------------------------------------------------------------
-# Directional helper
-# ---------------------------------------------------------------------------
-
-def classify_direction(
-    my_x: float,
-    opp_x: float,
-    facing: float,
-    is_forward: bool,
-) -> str:
-    """Classify a directional action as 'toward' or 'away' from the opponent.
-
-    Args:
-        my_x: Player's x position.
-        opp_x: Opponent's x position.
-        facing: Player's facing direction (1.0 = right, -1.0 = left).
-        is_forward: Whether the action goes in the facing direction.
-
-    Returns:
-        'toward' or 'away'.
-    """
-    opp_in_facing_dir = (facing > 0 and opp_x > my_x) or (facing < 0 and opp_x < my_x)
-    if opp_in_facing_dir:
-        return "toward" if is_forward else "away"
-    return "away" if is_forward else "toward"
-
-
-# ---------------------------------------------------------------------------
-# Replay iteration helper
-# ---------------------------------------------------------------------------
-
-def _iter_1v1_games(
-    replay_root: str | Path,
-    pg: pd.DataFrame,
-    tag: str,
-    character: str | None = None,
-):
-    """Yield (game_info, my_df, opp_df, character_name) for each 1v1 game the player is in.
-
-    Args:
-        replay_root: Root directory of replays.
-        pg: Player-game DataFrame from player_games().
-        tag: Player tag to filter on (e.g. "EG＃0").
-        character: Optional character filter. If None, include all characters.
-    """
-    me = pg[(pg.tag == tag) & pg.opp_character.notna()]
-    if character:
-        me = me[me.character == character]
-    filenames = set(me.filename)
-
-    slp_lookup = {f.name: f for f in Path(replay_root).rglob("*.slp")}
-
-    for fname in sorted(filenames):
-        fpath = slp_lookup.get(fname)
-        if not fpath:
-            continue
-        try:
-            result = extract_frames(str(fpath), include_inputs=False)
-        except Exception:
-            continue
-
-        gi = result["game_info"]
-        gi["filepath"] = str(fpath)
-        if gi["num_players"] != 2:
-            continue
-
-        my_idx = None
-        for i in range(2):
-            t = gi.get(f"p{i}_netplay_code") or gi.get(f"p{i}_netplay_name") or gi.get(f"p{i}_name_tag") or ""
-            if t == tag:
-                my_idx = i
-                break
-        if my_idx is None:
-            continue
-
-        opp_idx = 1 - my_idx
-        my_df = result["players"][my_idx]
-        opp_df = result["players"][opp_idx]
-        char_name = my_df["character_name"].iloc[0]
-
-        if character and char_name != character:
-            continue
-
-        yield gi, my_df, opp_df, char_name
+from melee_tools.action_states import ACTION_STATE_CATEGORIES
+from melee_tools.iteration import _iter_1v1_games, classify_direction
+from melee_tools.moves import move_name
+from melee_tools.techniques import detect_wavedashes
 
 
 def _get_opp_x(opp_df: pd.DataFrame, frame: int) -> float | None:
@@ -312,8 +229,6 @@ def analyze_hits_taken(
             count=("damage", "count"), avg_dmg=("damage", "mean")
         ).sort_values("count", ascending=False)
     """
-    from melee_tools.moves import move_name
-
     rows = []
     for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
         my_pct = my_df["percent"].values.astype(float)
@@ -407,8 +322,6 @@ def analyze_neutral_attacks(
         attacks = add_pct_buckets(attacks, pct_col="opp_pct")
         plot_moves_by_bucket(attacks, title="Falcon Neutral Attacks by %")
     """
-    from melee_tools.action_states import ACTION_STATE_CATEGORIES
-
     # Build state -> category lookup (only for attack categories)
     state_to_cat: dict[int, str] = {}
     for cat in _ATTACK_CAT_TO_MOVE:
@@ -455,3 +368,175 @@ def analyze_neutral_attacks(
             })
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Attacker response classification
+# ---------------------------------------------------------------------------
+
+_ATKRESP_CATS = [
+    "jab", "ftilt", "utilt", "dtilt", "fsmash", "usmash", "dsmash",
+    "dash_attack", "grab", "nair", "fair", "bair", "uair", "dair",
+]
+_ATKRESP_DISPLAY = {
+    "jab": "Jab", "ftilt": "F-tilt", "utilt": "U-tilt", "dtilt": "D-tilt",
+    "fsmash": "F-smash", "usmash": "U-smash", "dsmash": "D-smash",
+    "dash_attack": "Dash Attack", "grab": "Grab",
+    "nair": "Nair", "fair": "Fair", "bair": "Bair", "uair": "U-air", "dair": "D-air",
+}
+_ATKRESP_STATE_MAP: dict[int, str] = {}
+for _cat in _ATKRESP_CATS:
+    for _s in ACTION_STATE_CATEGORIES.get(_cat, set()):
+        _ATKRESP_STATE_MAP[_s] = _ATKRESP_DISPLAY[_cat]
+
+# Transitional states to skip when looking for first meaningful attacker action
+_ATKRESP_SKIP = frozenset({
+    14,                         # WAIT
+    24,                         # KNEE_BEND (jumpsquat)
+    42, 43,                     # LANDING
+    15, 16, 17,                 # WALK
+    20, 21, 22, 23,             # DASH/RUN
+    18, 19,                     # TURN
+    25, 26, 27, 28,             # JUMP
+    29, 30, 31, 32, 33, 34,    # FALL
+})
+
+
+def classify_attacker_response(
+    states: np.ndarray,
+    frames: np.ndarray,
+    trigger_frame: int,
+    window: int = 60,
+) -> str:
+    """Classify the attacker's first meaningful action after a trigger frame.
+
+    Scans a window of frames for the first non-transitional state and returns
+    a human-readable action name. Useful for analyzing what a player does after
+    knocking down an opponent.
+
+    Designed to work with raw numpy arrays so it can be called from both
+    library multi-game wrappers and custom peppi_py scanners.
+
+    Args:
+        states: Array of action state IDs for the attacker.
+        frames: Array of frame numbers corresponding to states.
+        trigger_frame: Frame at which the event occurred (e.g., knockdown).
+        window: Number of frames to search ahead. Default 60 (1 second).
+
+    Returns:
+        Action name string (e.g. "Grab", "D-smash", "Wavedash", "Shield"),
+        or "Other/None" if no meaningful action found in window.
+    """
+    start_idx = int(np.searchsorted(frames, trigger_frame))
+    end_idx = int(np.searchsorted(frames, trigger_frame + window))
+    for i in range(start_idx, min(end_idx, len(states))):
+        s = int(states[i]) if not np.isnan(states[i]) else 0
+        if s in _ATKRESP_SKIP:
+            continue
+        if s in _ATKRESP_STATE_MAP:
+            return _ATKRESP_STATE_MAP[s]
+        if s == 236:            # ESCAPE_AIR — wavedash (no position check here)
+            return "Wavedash"
+        if s in {178, 179, 180}:  # shield
+            return "Shield"
+        break
+    return "Other/None"
+
+
+# ---------------------------------------------------------------------------
+# Out-of-shield option analysis
+# ---------------------------------------------------------------------------
+
+_OOS_SHIELD_STATES = frozenset(ACTION_STATE_CATEGORIES.get("shield", {178, 179, 180, 349}))
+_OOS_GRAB_STATES   = frozenset(ACTION_STATE_CATEGORIES.get("grab",   {212, 213, 214, 215}))
+_OOS_ROLL_ST       = frozenset({233, 234})
+_OOS_SPOTDODGE_ST  = frozenset({235})
+_OOS_FALL_ST       = frozenset({29, 30, 31, 32, 33, 34})
+_OOS_GROUNDED_ST   = frozenset({14, 20, 21, 22, 23, 39, 40, 41})
+_OOS_JS            = 24   # JUMPSQUAT
+
+_OOS_AERIAL_ST: set[int] = set()
+for _cat in ["nair", "fair", "bair", "uair", "dair"]:
+    _OOS_AERIAL_ST |= set(ACTION_STATE_CATEGORIES.get(_cat, set()))
+
+_OOS_ATTACK_ST: set[int] = set()
+for _cat in ["jab", "ftilt", "utilt", "dtilt", "fsmash", "usmash", "dsmash", "dash_attack"]:
+    _OOS_ATTACK_ST |= set(ACTION_STATE_CATEGORIES.get(_cat, set()))
+
+
+def _classify_oos_exit(states_arr: np.ndarray, frames_arr: np.ndarray, i: int, wd_frame_set: set) -> "str | None":
+    """Classify a single shield exit at array index i."""
+    n = len(states_arr)
+    s = int(states_arr[i]) if not pd.isna(states_arr[i]) else 0
+
+    if s in _OOS_GRAB_STATES:  return "grab OOS"
+    if s in _OOS_ATTACK_ST:    return "attack OOS"
+    if s in _OOS_ROLL_ST:      return "roll OOS"
+    if s in _OOS_SPOTDODGE_ST: return "spotdodge OOS"
+    if s in _OOS_FALL_ST:      return "shield drop"
+
+    if s == _OOS_JS:
+        js_frame = int(frames_arr[i])
+        if js_frame in wd_frame_set:
+            return None  # wavedash rows already added separately
+        for j in range(i + 1, min(i + 25, n)):
+            sj = int(states_arr[j]) if not pd.isna(states_arr[j]) else 0
+            if sj in _OOS_AERIAL_ST:
+                return "aerial OOS"
+            if sj in _OOS_GROUNDED_ST or sj in _OOS_ROLL_ST or sj in _OOS_SPOTDODGE_ST:
+                break
+        return "jump → other"
+
+    return None
+
+
+def analyze_oos_options(
+    replay_root,
+    pg: pd.DataFrame,
+    tag: str,
+    character: "str | None" = None,
+) -> pd.DataFrame:
+    """Analyze out-of-shield options for a player across 1v1 replays.
+
+    Classifies each shield exit as one of:
+        wavedash toward, wavedash back, aerial OOS,
+        grab OOS, attack OOS, roll OOS,
+        spotdodge OOS, jump → other, shield drop.
+
+    Wavedash exits are detected via detect_wavedashes() and separated from
+    other jumpsquat exits.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag.
+        character: Optional character filter.
+
+    Returns:
+        DataFrame with columns: character, option.
+        Aggregate with: df.groupby(["character", "option"]).size()
+    """
+    rows = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
+        states_arr = my_df["state"].values
+        frames_arr = my_df["frame"].values.astype(int)
+
+        wds = detect_wavedashes(my_df, opp_df)
+        wd_frame_set = set(wds["frame"].values) if len(wds) > 0 else set()
+
+        for _, wd in wds.iterrows():
+            if wd["toward_opp"] is not None:
+                opt = "wavedash toward" if wd["toward_opp"] else "wavedash back"
+            else:
+                opt = "wavedash OOS"
+            rows.append({"character": char_name, "option": opt})
+
+        for i in range(1, len(states_arr)):
+            s_prev = int(states_arr[i - 1]) if not pd.isna(states_arr[i - 1]) else 0
+            s_curr = int(states_arr[i])     if not pd.isna(states_arr[i])     else 0
+            if s_prev in _OOS_SHIELD_STATES and s_curr not in _OOS_SHIELD_STATES:
+                opt = _classify_oos_exit(states_arr, frames_arr, i, wd_frame_set)
+                if opt:
+                    rows.append({"character": char_name, "option": opt})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["character", "option"])

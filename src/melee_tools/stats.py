@@ -4,57 +4,48 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from peppi_py import read_slippi
 
-from melee_tools.enums import character_name, stage_name
-from melee_tools.frames import _arrow_to_numpy
+from melee_tools.frames import extract_frames
+from melee_tools.parse import parse_game
 
 
-def compute_player_stats(game, player_index: int) -> dict:
-    """Compute per-game stats for one player from frame data.
+def compute_player_stats(player_df: pd.DataFrame) -> dict:
+    """Compute per-game stats for one player from a frame DataFrame.
 
-    Returns dict with keys like:
-        damage_dealt, damage_received, stocks_taken, stocks_lost,
-        kill_count, death_count, l_cancel_success, l_cancel_total,
-        l_cancel_rate, apm, max_combo
+    Args:
+        player_df: Player frame DataFrame from extract_frames().
+
+    Returns dict with keys:
+        stocks_lost, damage_received, l_cancel_success, l_cancel_total,
+        l_cancel_rate, max_combo
     """
-    post = game.frames.ports[player_index].leader.post
-
-    percent = _arrow_to_numpy(post.percent)
-    stocks = _arrow_to_numpy(post.stocks)
-    l_cancel = _arrow_to_numpy(post.l_cancel)
-    combo_count = _arrow_to_numpy(post.combo_count)
-
-    # Filter to non-null frames
-    valid = ~np.isnan(percent) if percent.dtype.kind == 'f' else np.ones(len(percent), dtype=bool)
+    percent = player_df["percent"].values.astype(float)
+    stocks = player_df["stocks"].values.astype(float)
 
     # Stocks lost = starting stocks - ending stocks
-    valid_stocks = stocks[~pd.isna(stocks)]
+    valid_stocks = stocks[~np.isnan(stocks)]
     if len(valid_stocks) > 0:
-        stocks_start = int(valid_stocks[0])
-        stocks_end = int(valid_stocks[-1])
-        stocks_lost = stocks_start - stocks_end
+        stocks_lost = int(valid_stocks[0]) - int(valid_stocks[-1])
     else:
-        stocks_start = stocks_end = stocks_lost = 0
+        stocks_lost = 0
 
     # Damage received = sum of percent increases (reset on death to 0)
-    valid_pct = percent[~np.isnan(percent)] if percent.dtype.kind == 'f' else percent[~pd.isna(percent)]
+    valid_pct = percent[~np.isnan(percent)]
     damage_received = 0.0
     if len(valid_pct) > 1:
-        diffs = np.diff(valid_pct.astype(float))
-        # Positive diffs = damage taken. Negative diffs = stock reset (ignore).
+        diffs = np.diff(valid_pct)
         damage_received = float(np.sum(diffs[diffs > 0]))
 
     # L-cancel stats: 1 = success, 2 = failure, 0 = not applicable
-    valid_lc = l_cancel[~pd.isna(l_cancel)].astype(int)
-    l_cancel_success = int(np.sum(valid_lc == 1))
-    l_cancel_fail = int(np.sum(valid_lc == 2))
+    lc = player_df["l_cancel"].dropna().values.astype(int)
+    l_cancel_success = int(np.sum(lc == 1))
+    l_cancel_fail = int(np.sum(lc == 2))
     l_cancel_total = l_cancel_success + l_cancel_fail
     l_cancel_rate = round(l_cancel_success / l_cancel_total, 4) if l_cancel_total > 0 else None
 
     # Max combo count (from the game's built-in combo counter)
-    valid_combo = combo_count[~pd.isna(combo_count)].astype(int)
-    max_combo = int(np.max(valid_combo)) if len(valid_combo) > 0 else 0
+    combo = player_df["combo_count"].dropna().values.astype(int)
+    max_combo = int(np.max(combo)) if len(combo) > 0 else 0
 
     return {
         "stocks_lost": stocks_lost,
@@ -66,26 +57,28 @@ def compute_player_stats(game, player_index: int) -> dict:
     }
 
 
-def compute_stock_events(game, player_index: int) -> list[dict]:
+def compute_stock_events(player_df: pd.DataFrame) -> list[dict]:
     """Extract per-stock data for one player: when each stock was lost, at what %, etc.
 
-    Returns list of dicts, one per stock lost:
-        stock_number, death_frame, death_percent, stock_duration_frames
-    """
-    post = game.frames.ports[player_index].leader.post
-    stocks = _arrow_to_numpy(post.stocks)
-    percent = _arrow_to_numpy(post.percent)
-    frame_ids = _arrow_to_numpy(game.frames.id)
+    Args:
+        player_df: Player frame DataFrame from extract_frames().
 
-    valid_mask = ~pd.isna(stocks)
+    Returns list of dicts, one per stock lost:
+        stock_number, death_frame, death_percent, stock_duration_frames,
+        stock_duration_seconds
+    """
+    stocks = player_df["stocks"].values.astype(float)
+    percent = player_df["percent"].values.astype(float)
+    frames = player_df["frame"].values.astype(int)
+
+    valid_mask = ~np.isnan(stocks)
     stocks_valid = stocks[valid_mask].astype(int)
-    percent_valid = percent[valid_mask].astype(float)
-    frames_valid = frame_ids[valid_mask]
+    percent_valid = percent[valid_mask]
+    frames_valid = frames[valid_mask]
 
     if len(stocks_valid) < 2:
         return []
 
-    # Find frames where stock count decreases
     stock_diffs = np.diff(stocks_valid)
     death_indices = np.where(stock_diffs < 0)[0]
 
@@ -113,39 +106,38 @@ def compute_stock_events(game, player_index: int) -> list[dict]:
     return events
 
 
-def compute_damage_dealt(game, num_players: int) -> dict[int, float]:
+def compute_damage_dealt(player_dfs: dict[int, pd.DataFrame]) -> dict[int, float]:
     """Estimate damage dealt by each player.
 
     Uses the percent increase on OTHER players' frames correlated with
     last_hit_by to attribute damage. Returns {player_index: damage_dealt}.
+
+    Args:
+        player_dfs: Dict mapping player_index -> player frame DataFrame.
 
     Note: last_hit_by uses actual port numbers (0-3), not sequential player
     indices, so we build a port->player_index mapping.
     """
     # Build port number -> player index mapping
     port_to_idx = {}
-    for idx, player in enumerate(game.start.players):
-        if player is not None:
-            port_num = player.port.value if hasattr(player.port, 'value') else player.port
-            port_to_idx[port_num] = idx
+    for idx, df in player_dfs.items():
+        port = int(df["port"].iloc[0])
+        port_to_idx[port] = idx
 
-    damage_dealt = {i: 0.0 for i in range(num_players)}
+    damage_dealt = {idx: 0.0 for idx in player_dfs}
 
-    for target_idx in range(num_players):
-        post = game.frames.ports[target_idx].leader.post
-        percent = _arrow_to_numpy(post.percent)
-        last_hit_by = _arrow_to_numpy(post.last_hit_by)
+    for target_idx, target_df in player_dfs.items():
+        pct = target_df["percent"].values.astype(float)
+        last_hit_by = target_df["last_hit_by"].values
 
-        valid_pct = percent.astype(float)
-
-        for i in range(1, len(valid_pct)):
-            if np.isnan(valid_pct[i]) or np.isnan(valid_pct[i - 1]):
+        for i in range(1, len(pct)):
+            if np.isnan(pct[i]) or np.isnan(pct[i - 1]):
                 continue
-            dmg = valid_pct[i] - valid_pct[i - 1]
+            dmg = pct[i] - pct[i - 1]
             if dmg > 0:
                 attacker_port = int(last_hit_by[i]) if not pd.isna(last_hit_by[i]) else -1
                 attacker_idx = port_to_idx.get(attacker_port, -1)
-                if 0 <= attacker_idx < num_players:
+                if attacker_idx in damage_dealt:
                     damage_dealt[attacker_idx] += dmg
 
     return {k: round(v, 1) for k, v in damage_dealt.items()}
@@ -173,15 +165,17 @@ _COMPASS_LABELS = [
 ]
 
 
-def compute_button_presses(game, player_index: int) -> dict:
+def compute_button_presses(player_df: pd.DataFrame) -> dict:
     """Count rising-edge button presses for one player.
+
+    Args:
+        player_df: Player frame DataFrame from extract_frames(include_inputs=True).
+            Requires input_* columns.
 
     Tracks digital buttons, analog triggers (>0.5 threshold),
     and joystick directions (16 compass bins, deadzone 0.3).
     """
-    pre = game.frames.ports[player_index].leader.pre
-
-    buttons = _arrow_to_numpy(pre.buttons_physical).astype(np.int64)
+    buttons = player_df["input_buttons_physical"].values.astype(np.int64)
     counts = {}
 
     # Digital buttons — rising edge detection
@@ -190,15 +184,15 @@ def compute_button_presses(game, player_index: int) -> dict:
         counts[name] = int(np.sum(pressed[1:] & ~pressed[:-1]))
 
     # Soft triggers — rising edge on analog > 0.5
-    if pre.triggers_physical is not None:
-        for side, arr in [("soft_L", pre.triggers_physical.l), ("soft_R", pre.triggers_physical.r)]:
-            vals = _arrow_to_numpy(arr).astype(float)
+    if "input_trigger_l" in player_df.columns:
+        for side, col in [("soft_L", "input_trigger_l"), ("soft_R", "input_trigger_r")]:
+            vals = player_df[col].values.astype(float)
             active = vals > 0.5
             counts[side] = int(np.sum(active[1:] & ~active[:-1]))
 
     # Joystick directions — 16 compass bins, deadzone 0.3
-    joy_x = _arrow_to_numpy(pre.joystick.x).astype(float)
-    joy_y = _arrow_to_numpy(pre.joystick.y).astype(float)
+    joy_x = player_df["input_joystick_x"].values.astype(float)
+    joy_y = player_df["input_joystick_y"].values.astype(float)
     magnitude = np.sqrt(joy_x ** 2 + joy_y ** 2)
     outside = magnitude > 0.3
 
@@ -223,23 +217,25 @@ def compute_button_presses(game, player_index: int) -> dict:
 def game_stats(filepath: str | Path) -> dict:
     """Compute comprehensive stats for a single game.
 
+    Parses the replay once via extract_frames() and computes all stats from
+    the resulting DataFrames.
+
     Returns a dict combining game metadata with per-player stats.
     """
     filepath = Path(filepath)
-    game = read_slippi(str(filepath))
 
-    from melee_tools.parse import parse_game
-    info = parse_game(filepath)
+    result = extract_frames(str(filepath), include_inputs=True)
+    info = result["game_info"]
     info["duration_minutes"] = round(info["duration_frames"] / 3600, 4) if info.get("duration_frames") else None
 
-    num_players = info["num_players"]
-    damage_dealt = compute_damage_dealt(game, num_players)
+    player_dfs = result["players"]
+    damage_dealt = compute_damage_dealt(player_dfs)
 
-    for idx in range(num_players):
+    for idx, player_df in player_dfs.items():
         prefix = f"p{idx}"
-        pstats = compute_player_stats(game, idx)
-        stock_events = compute_stock_events(game, idx)
-        btn = compute_button_presses(game, idx)
+        pstats = compute_player_stats(player_df)
+        stock_events = compute_stock_events(player_df)
+        btn = compute_button_presses(player_df)
 
         for key, val in btn.items():
             info[f"{prefix}_btn_{key}"] = val

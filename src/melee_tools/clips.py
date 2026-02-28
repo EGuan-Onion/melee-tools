@@ -25,9 +25,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from melee_tools.action_states import ACTION_STATE_CATEGORIES
 from melee_tools.aliases import resolve_character, resolve_move, resolve_move_sequence
 from melee_tools.combos import detect_combos
-from melee_tools.habits import _iter_1v1_games
+from melee_tools.iteration import _iter_1v1_games, classify_direction
 from melee_tools.moves import MOVE_NAMES, move_name
 from melee_tools.query import find_kills
 from melee_tools.stages import STAGE_GEOMETRY
@@ -463,7 +464,7 @@ def find_tech_chases(
     Returns:
         Clip DataFrame with standardized schema.
     """
-    from melee_tools.habits import classify_direction
+
 
     char_filter = None
     if character:
@@ -676,9 +677,6 @@ def find_confirmed_events(
             root, pg, TAG, trigger="fair", outcome="kill", as_attacker=False,
         )
     """
-    from melee_tools.action_states import ACTION_STATE_CATEGORIES
-    from melee_tools.aliases import resolve_character, resolve_move
-    from melee_tools.moves import move_name as _move_name
 
     # --- Resolve character ---
     char_filter = None
@@ -703,7 +701,7 @@ def find_confirmed_events(
         if resolved is not None:
             trigger_move_id = resolved
             trigger_type = "move"
-            trigger_label = _move_name(trigger_move_id)
+            trigger_label = move_name(trigger_move_id)
         else:
             cat_states = ACTION_STATE_CATEGORIES.get(trigger)
             if cat_states:
@@ -723,7 +721,7 @@ def find_confirmed_events(
         outcome_move_id = resolve_move(outcome, character=char_filter)
         if outcome_move_id is None:
             raise ValueError(f"Cannot resolve outcome move: {outcome!r}")
-        outcome_label = _move_name(outcome_move_id)
+        outcome_label = move_name(outcome_move_id)
     elif outcome == "kill":
         outcome_label = "kill"
     else:
@@ -846,6 +844,111 @@ def find_confirmed_events(
                 },
             )
             row["converted"] = converted
+            row["opp_pct_at_trigger"] = opp_pct_at
             rows.append(row)
 
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Ledgedash detection
+# ---------------------------------------------------------------------------
+
+_LEDGE_HANG = {253, 362, 363}
+_LEDGE_FALL_STATES = {29, 30, 31, 32, 33, 34}
+_LEDGE_JUMPSQUAT = 24
+_LEDGE_AIRDODGE = 236
+_LEDGE_DAMAGE_STATES = set(range(75, 92)) | {357}
+
+
+def find_ledgedashes(
+    replay_root: str | Path,
+    pg: pd.DataFrame,
+    tag: str,
+    character: str | None = None,
+) -> pd.DataFrame:
+    """Find ledgedash instances across 1v1 replays.
+
+    A ledgedash is the sequence: ledge hang → drop (fall state) → jumpsquat →
+    airdodge → landing. The invincibility frames carried from the ledge hang
+    persist through this sequence, making it a strong defensive option.
+
+    Args:
+        replay_root: Root directory of replays.
+        pg: Player-game DataFrame from player_games().
+        tag: Player tag.
+        character: Optional character filter (supports aliases).
+
+    Returns:
+        DataFrame with columns: character, frame, land_frame, filename.
+        One row per ledgedash detected. ``frame`` is the last ledge-hang
+        frame (hang exit); ``land_frame`` is the frame of landing.
+
+    Example:
+        games = parse_replays("replays")
+        pg = player_games(games)
+        lds = find_ledgedashes("replays", pg, "EG#0", character="Sheik")
+        print(f"Ledgedash rate: {len(lds)} total")
+    """
+    char_filter = None
+    if character:
+        try:
+            from melee_tools.aliases import resolve_character
+            chars = resolve_character(character)
+            char_filter = chars[0] if len(chars) == 1 else None
+        except Exception:
+            char_filter = character
+
+    rows = []
+    for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
+        states = my_df["state"].values
+        frames = my_df["frame"].values.astype(int)
+        n = len(states)
+
+        in_hang = np.isin(states, list(_LEDGE_HANG))
+
+        for i in range(1, n - 40):
+            if not in_hang[i]:
+                continue
+            ni = i + 1
+            if ni >= n or in_hang[ni]:
+                continue
+
+            # Must exit ledge into a fall state (hang drop)
+            next_s = int(states[ni]) if not pd.isna(states[ni]) else 0
+            if next_s not in _LEDGE_FALL_STATES:
+                continue
+
+            # Look for: fall → jumpsquat → airdodge → land
+            found_js = False
+            land_frame = None
+            for j in range(ni + 1, min(ni + 20, n)):
+                sj = int(states[j]) if not pd.isna(states[j]) else 0
+                if sj == _LEDGE_JUMPSQUAT:
+                    found_js = True
+                elif found_js and sj == _LEDGE_AIRDODGE:
+                    # Find landing: first grounded non-fall/non-airdodge state
+                    for k in range(j + 1, min(j + 20, n)):
+                        sk = int(states[k]) if not pd.isna(states[k]) else 0
+                        if (sk not in {_LEDGE_AIRDODGE}
+                                and sk not in _LEDGE_FALL_STATES
+                                and sk != _LEDGE_JUMPSQUAT):
+                            land_frame = int(frames[k])
+                            break
+                    break
+                elif sj in _LEDGE_HANG or sj in _LEDGE_DAMAGE_STATES:
+                    break
+
+            if land_frame is None:
+                continue
+
+            rows.append({
+                "character": char_name,
+                "frame": int(frames[i]),
+                "land_frame": land_frame,
+                "filename": gi["filename"],
+            })
+
+    if rows:
+        return pd.DataFrame(rows)
+    return pd.DataFrame(columns=["character", "frame", "land_frame", "filename"])

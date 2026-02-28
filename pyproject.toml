@@ -11,6 +11,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
 notebooks = [
     "jupyter",
     "matplotlib",

@@ -30,7 +30,7 @@ Thumbs.db
 replays/
 
 # Generated outputs
-output/
+outputs/
 
 # Claude
 .claude/

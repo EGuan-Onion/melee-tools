@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from melee_tools.action_states import ACTION_STATE_CATEGORIES
-from melee_tools.habits import _iter_1v1_games
+from melee_tools.iteration import _iter_1v1_games
 from melee_tools.moves import move_name
 
 # ---------------------------------------------------------------------------

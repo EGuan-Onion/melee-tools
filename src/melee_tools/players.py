@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from melee_tools.stats import game_stats
+
 
 def player_games(games: pd.DataFrame) -> pd.DataFrame:
     """Unpivot a game-level DataFrame into one row per player-game.
@@ -79,8 +81,6 @@ def player_stats(
             l_cancel_rate, max_combo,
             stock4_death_pct … stock1_death_pct  (per-stock death percents)
     """
-    from melee_tools.stats import game_stats
-
     replay_root = Path(replay_root)
     rows = []
 

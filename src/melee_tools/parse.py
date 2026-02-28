@@ -126,7 +126,7 @@ def parse_directory(
     for slp_file in sorted(directory.glob("*.slp")):
         try:
             rows.append(parse_fn(slp_file))
-        except Exception as e:
+        except BaseException as e:
             errors.append({"filename": slp_file.name, "error": str(e)})
 
     if errors:
@@ -163,7 +163,7 @@ def parse_replays(
     for slp_file in sorted(root.rglob("*.slp")):
         try:
             rows.append(parse_fn(slp_file))
-        except Exception as e:
+        except BaseException as e:
             errors.append({"filename": slp_file.name, "error": str(e)})
 
     if errors:

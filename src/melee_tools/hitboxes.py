@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 from melee_tools.aliases import resolve_character, resolve_move
-from melee_tools.habits import _iter_1v1_games
+from melee_tools.iteration import _iter_1v1_games
 from melee_tools.moves import MOVE_NAMES, move_name
 
 

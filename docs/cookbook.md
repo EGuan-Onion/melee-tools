@@ -7,76 +7,82 @@ term-to-data mappings, see `glossary.md`.
 ## Setup (common imports)
 
 ```python
-import os
 import pandas as pd
-import sys
-sys.path.insert(0, '../src')  # if running from notebooks/
 
-from melee_tools.frames import extract_frames, extract_all_players_frames
-from melee_tools.query import (
-    find_kills, find_kills_for_character, find_state_entries,
-    find_state_exits, next_action_after, post_state_actions,
+from melee_tools import (
+    parse_replays, player_games,
+    find_kills, find_state_entries, find_state_exits, next_action_after,
+    analyze_kills, analyze_combos,
+    game_stats, game_stats_directory,
 )
+from melee_tools.frames import extract_frames, extract_all_players_frames
 from melee_tools.action_states import ACTION_STATE_CATEGORIES, ACTION_STATES, FRIENDLY_NAMES
 from melee_tools.moves import MOVE_NAMES, move_name
 from melee_tools.enums import character_name
-from melee_tools.stats import game_stats, game_stats_directory
 
 REPLAY_DIR = '../replays'
+TAG = "EG＃0"
+
+games = parse_replays(REPLAY_DIR)
+pg = player_games(games)
 ```
 
 ---
 
 ## Pattern 1: "What attack does [character] kill with most?"
 
-**Approach:** Find all kills by the character across replays, group by
-`killing_move`.
+**Approach:** Use `analyze_kills()` to find all kills by a character across
+replays, then group by `killing_move`.
 
 ```python
-kills = find_kills_for_character(REPLAY_DIR, "Captain Falcon", as_attacker=True)
+kills = analyze_kills(REPLAY_DIR, pg, TAG, character="Captain Falcon")
 print(kills['killing_move'].value_counts())
 ```
 
 **Variations:**
-- Filter by stage: `kills[kills['stage'] == 'Dream Land N64']`
-- Filter by victim: `kills[kills['victim_character'] == 'Fox']`
 - Average kill percent: `kills.groupby('killing_move')['death_percent'].mean()`
+- By opponent: `kills.groupby('opp_character')['killing_move'].value_counts()`
 
 ---
 
-## Pattern 2: "Which blastzone does [character] die off of most on [stage]?"
+## Pattern 2: "Which blastzone does [character] die off of most?"
 
-**Approach:** Find all deaths of the character, filter by stage, group by
-`blastzone`.
+**Approach:** Use `analyze_kills()` with `as_attacker=False` to find deaths,
+then group by `blastzone`.
 
 ```python
-deaths = find_kills_for_character(REPLAY_DIR, "Jigglypuff", as_attacker=False)
-dreamland = deaths[deaths['stage'] == 'Dream Land N64']
-print(dreamland['blastzone'].value_counts())
+deaths = analyze_kills(REPLAY_DIR, pg, TAG, character="Sheik", as_attacker=False)
+print(deaths['blastzone'].value_counts())
 ```
 
 **Variations:**
-- By attacker: `dreamland.groupby('attacker_character')['blastzone'].value_counts()`
-- By killing move per blastzone: `dreamland.groupby('blastzone')['killing_move'].value_counts()`
+- By attacker: `deaths.groupby('opp_character')['blastzone'].value_counts()`
+- By killing move per blastzone: `deaths.groupby('blastzone')['killing_move'].value_counts()`
 
 ---
 
 ## Pattern 3: "After [event], what does [character] do?"
 
-**Approach:** Find exits from the trigger state category, then look for the
-next action within a time window.
+**Approach:** Use `find_state_exits()` + `next_action_after()` on per-game
+DataFrames via `_iter_1v1_games()`.
 
 ```python
-# After getting hit (leaving hitstun), what does Fox do?
-actions = post_state_actions(REPLAY_DIR, "Fox", "damage", "any", window_frames=60)
-print(actions['state_name'].value_counts())
+from melee_tools.iteration import _iter_1v1_games
+
+damage_states = ACTION_STATE_CATEGORIES['damage']
+all_actions = set(ACTION_STATES.keys()) - damage_states
+
+results = []
+for gi, my_df, opp_df, char_name in _iter_1v1_games(REPLAY_DIR, pg, TAG, character="Fox"):
+    exits = find_state_exits(my_df, damage_states)
+    actions = next_action_after(my_df, exits.index, all_actions, window_frames=60)
+    results.extend(actions)
+
+pd.DataFrame(results)['state_name'].value_counts()
 ```
 
 **Common trigger categories:** `"damage"`, `"spawn"`, `"shield_stun"`,
 `"grabbed"`, `"ledge_hang"`, `"tech"`, `"missed_tech_down"`, `"missed_tech_up"`
-
-**Common target categories:** `"any"`, `"aerial"`, `"ground_attack"`,
-`"dodge"`, `"grab"`, `"shield"`, `"jump"`
 
 ---
 
@@ -378,28 +384,15 @@ print(f"Non-CC hits taken: {hit_while_standing_count}")
 
 ## Pattern 13: "Edgeguard analysis — how does [player] get kills offstage?"
 
-**Approach:** Find kills where the victim's death position is offstage (past
-the stage edge), indicating an edgeguard rather than a raw onstage kill.
+**Approach:** Use `analyze_kills()` and classify by blastzone as a proxy for
+edgeguard vs onstage kills.
 
 ```python
-# Approximate stage edge positions (x) for common stages
-STAGE_EDGES = {
-    'Battlefield': 68.4,
-    'Final Destination': 85.6,
-    'Dream Land N64': 77.3,
-    "Yoshi's Story": 56.0,
-    'Fountain of Dreams': 63.4,
-    'Pokemon Stadium': 87.8,
-}
+kills = analyze_kills(REPLAY_DIR, pg, TAG, character="Marth")
 
-kills = find_kills_for_character(REPLAY_DIR, "Marth", as_attacker=True)
-# Classify kills as onstage vs edgeguard based on victim position
-# (would need position data at death frame — extend find_kills to include it)
-# For now, use blastzone as proxy:
-# - Side blastzones (left/right) are more likely edgeguard kills
-# - Top blastzone kills are more likely onstage (usmash, uair, uthrow combos)
-# - Bottom blastzone kills are almost always edgeguards (spikes, gimps)
-
+# Blastzone as proxy:
+# - Side (left/right) and bottom = likely edgeguard/gimp kills
+# - Top = likely onstage kills (usmash, uair, uthrow combos)
 edgeguard_kills = kills[kills['blastzone'].isin(['left', 'right', 'bottom'])]
 onstage_kills = kills[kills['blastzone'] == 'top']
 print(f"Edgeguard kills: {len(edgeguard_kills)} ({len(edgeguard_kills)/len(kills):.0%})")

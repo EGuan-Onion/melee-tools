@@ -19,7 +19,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from melee_tools.iteration import _iter_1v1_games
 from melee_tools.moves import move_name
+from melee_tools.query import find_kills
 
 _STRICTNESS_PRESETS = {
     0: 0,    # true combo — continuous hitstun
@@ -191,8 +193,6 @@ def analyze_combos(
     Returns:
         DataFrame of combos with character, filename, gap_frames columns added.
     """
-    from melee_tools.habits import _iter_1v1_games
-
     all_combos = []
 
     for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
@@ -248,9 +248,6 @@ def analyze_kills(
         deaths = analyze_kills("replays", pg, "EG＃0", character="Sheik", as_attacker=False)
         deaths["killing_move"].value_counts()
     """
-    from melee_tools.habits import _iter_1v1_games
-    from melee_tools.query import find_kills
-
     all_kills = []
     for gi, my_df, opp_df, char_name in _iter_1v1_games(replay_root, pg, tag, character):
         opp_char = opp_df["character_name"].iloc[0]

@@ -1,6 +1,6 @@
 """
 10 Competitive Questions — Analysis Script
-Generates one figure per question and saves to replays/outputs/10q/
+Generates one figure per question and saves to outputs/10q/
 """
 
 import warnings
@@ -9,24 +9,20 @@ warnings.filterwarnings("ignore")
 import os
 import numpy as np
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
-from melee_tools import (
-    parse_replays, player_games,
-    analyze_combos, analyze_knockdowns, analyze_neutral_attacks,
-    find_kills, find_move_hits,
-    add_pct_buckets,
-)
-from melee_tools.frames import extract_frames
-from melee_tools.habits import _iter_1v1_games
-from melee_tools.action_states import ACTION_STATE_CATEGORIES
+from analysis.common import ROOT, TAG, games, pg
 
-TAG = "EG＃0"
-ROOT = "replays"
-OUT = "replays/outputs/10q"
+from melee_tools import (
+    analyze_combos, analyze_knockdowns, analyze_neutral_attacks,
+    find_move_hits,
+)
+from melee_tools.combos import analyze_kills
+from melee_tools.clips import find_confirmed_events
+from melee_tools.habits import analyze_hits_taken
+
+OUT = "outputs/10q"
 os.makedirs(OUT, exist_ok=True)
 
 STYLE = {
@@ -47,11 +43,6 @@ plt.rcParams.update(STYLE)
 
 ACCENT = ["#e94560", "#0f3460", "#533483", "#e94560", "#06b6d4",
           "#f59e0b", "#10b981", "#8b5cf6", "#f97316", "#ec4899"]
-
-print("Loading replays...")
-games = parse_replays(ROOT)
-pg = player_games(games)
-print(f"  {len(pg[pg.tag == TAG])} player-game rows for {TAG}\n")
 
 # ─────────────────────────────────────────────────────────────
 # Q1 — Average combo damage by opening move (Sheik + Falcon)
@@ -99,18 +90,7 @@ print("  saved q1")
 # ─────────────────────────────────────────────────────────────
 print("Q2: Kill percent distribution...")
 
-kill_rows = []
-for gi, my_df, opp_df, char_name in _iter_1v1_games(ROOT, pg, TAG):
-    kills = find_kills(opp_df, attacker_df=my_df)
-    for _, k in kills.iterrows():
-        kill_rows.append({
-            "character": char_name,
-            "death_percent": k["death_percent"],
-            "killing_move": k["killing_move"],
-            "blastzone": k["blastzone"],
-        })
-
-kills_df = pd.DataFrame(kill_rows).dropna(subset=["death_percent", "killing_move"])
+kills_df = analyze_kills(ROOT, pg, TAG).dropna(subset=["death_percent", "killing_move"])
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 fig.suptitle("Q2 — Kill Percent Distribution by Move (my kills)", fontsize=13, fontweight="bold")
@@ -223,34 +203,10 @@ print("  saved q4")
 # ─────────────────────────────────────────────────────────────
 print("Q5: Moves landed on me...")
 
-opp_hit_rows = []
-for gi, my_df, opp_df, char_name in _iter_1v1_games(ROOT, pg, TAG):
-    my_pct = my_df["percent"].values.astype(float)
-    my_stocks = my_df["stocks"].values.astype(float)
-    my_frames = my_df["frame"].values.astype(int)
-    opp_lal = opp_df["last_attack_landed"].values
-    opp_frames = opp_df["frame"].values.astype(int)
-    opp_lal_map = dict(zip(opp_frames, opp_lal))
-    opp_char = opp_df["character_name"].iloc[0]
-
-    from melee_tools.moves import move_name
-    for j in range(1, len(my_pct)):
-        if my_pct[j] > my_pct[j - 1] and my_stocks[j] == my_stocks[j - 1]:
-            frame = int(my_frames[j])
-            damage = round(round(my_pct[j], 1) - round(my_pct[j - 1], 1), 1)
-            mid = int(opp_lal_map.get(frame, 0))
-            if mid == 0:
-                continue
-            opp_hit_rows.append({
-                "my_char": char_name,
-                "opp_char": opp_char,
-                "move_id": mid,
-                "move": move_name(mid),
-                "my_pct_before": round(my_pct[j - 1], 1),
-                "damage": damage,
-            })
-
-opp_hits = pd.DataFrame(opp_hit_rows)
+opp_hits = pd.concat([
+    analyze_hits_taken(ROOT, pg, TAG, character="Sheik"),
+    analyze_hits_taken(ROOT, pg, TAG, character="Captain Falcon"),
+], ignore_index=True).rename(columns={"character": "my_char", "opp_character": "opp_char", "my_pct": "my_pct_before"})
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 fig.suptitle("Q5 — Moves Opponent Lands on Me (top 12)", fontsize=13, fontweight="bold")
@@ -357,21 +313,7 @@ print("  saved q7")
 # ─────────────────────────────────────────────────────────────
 print("Q8: Death positions...")
 
-death_rows = []
-for gi, my_df, opp_df, char_name in _iter_1v1_games(ROOT, pg, TAG):
-    deaths = find_kills(my_df, attacker_df=opp_df)
-    for _, d in deaths.iterrows():
-        death_rows.append({
-            "character": char_name,
-            "blastzone": d["blastzone"],
-            "death_percent": d["death_percent"],
-            "killing_move": d["killing_move"],
-            "death_x": d["death_x"],
-            "death_y": d["death_y"],
-            "stock_lost": d["stock_lost"],
-        })
-
-deaths_df = pd.DataFrame(death_rows).dropna(subset=["death_x", "death_y"])
+deaths_df = analyze_kills(ROOT, pg, TAG, as_attacker=False).dropna(subset=["death_x", "death_y"])
 
 bz_colors = {"top": ACCENT[0], "left": ACCENT[4], "right": ACCENT[6], "bottom": ACCENT[5]}
 
@@ -407,54 +349,13 @@ print("  saved q8")
 # ─────────────────────────────────────────────────────────────
 print("Q9: D-throw kill conversion...")
 
-# D-throw action state for Sheik
-DTHROW_STATES = ACTION_STATE_CATEGORIES.get("throw_down", set())
-# Also check manually — throw states vary by character
-# Sheik D-throw: action state 60 (THROW_D)
-DTHROW_STATES = DTHROW_STATES | {60}
-
+# THROW_LW (state 222) = down throw; min_opp_pct filters to kill-% situations
 KILL_PCT_THRESHOLD = 80   # only count as "kill opportunity" if opp is >= this %
-CONVERSION_WINDOW = 300   # frames to get the kill after d-throw
 
-rows_q9 = []
-for gi, my_df, opp_df, char_name in _iter_1v1_games(ROOT, pg, TAG, character="Sheik"):
-    opp_pct = opp_df["percent"].values.astype(float)
-    opp_stocks = opp_df["stocks"].values.astype(float)
-    opp_frames_arr = opp_df["frame"].values.astype(int)
-    opp_pct_map = dict(zip(opp_frames_arr, opp_pct))
-    opp_stocks_map = dict(zip(opp_frames_arr, opp_stocks))
-
-    my_states = my_df["state"].values
-    my_frames = my_df["frame"].values.astype(int)
-
-    for i in range(1, len(my_states)):
-        s = int(my_states[i]) if not pd.isna(my_states[i]) else 0
-        prev_s = int(my_states[i - 1]) if not pd.isna(my_states[i - 1]) else 0
-        if s not in DTHROW_STATES or prev_s in DTHROW_STATES:
-            continue
-
-        frame = int(my_frames[i])
-        opp_pct_at = opp_pct_map.get(frame, 0)
-        opp_stock_at = opp_stocks_map.get(frame, 4)
-
-        # Only care about kill-percent opportunities
-        if opp_pct_at < KILL_PCT_THRESHOLD:
-            rows_q9.append({"opp_pct": opp_pct_at, "converted": False, "opportunity": False})
-            continue
-
-        # Check if stock is lost within conversion window
-        converted = False
-        for j in range(i + 1, min(i + CONVERSION_WINDOW + 1, len(my_frames))):
-            f2 = int(my_frames[j])
-            s2_opp = opp_stocks_map.get(f2, opp_stock_at)
-            if s2_opp < opp_stock_at:
-                converted = True
-                break
-
-        rows_q9.append({"opp_pct": opp_pct_at, "converted": converted, "opportunity": True})
-
-q9_df = pd.DataFrame(rows_q9)
-q9_opp = q9_df[q9_df.opportunity]
+q9_opp = find_confirmed_events(
+    ROOT, pg, TAG, trigger={222}, outcome="kill",
+    character="Sheik", min_opp_pct=KILL_PCT_THRESHOLD,
+)
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 fig.suptitle(f"Q9 — Sheik D-throw Kill Conversion (opp ≥ {KILL_PCT_THRESHOLD}%)", fontsize=13, fontweight="bold")
@@ -475,9 +376,9 @@ else:
 
 ax = axes[1]
 if len(q9_opp) > 0:
-    bins = list(range(int(q9_opp.opp_pct.min()) // 10 * 10, 160, 10))
-    conv_pts = q9_opp[q9_opp.converted]["opp_pct"]
-    miss_pts = q9_opp[~q9_opp.converted]["opp_pct"]
+    bins = list(range(int(q9_opp["opp_pct_at_trigger"].min()) // 10 * 10, 160, 10))
+    conv_pts = q9_opp[q9_opp.converted]["opp_pct_at_trigger"]
+    miss_pts = q9_opp[~q9_opp.converted]["opp_pct_at_trigger"]
     ax.hist(conv_pts, bins=bins, color=ACCENT[6], alpha=0.7, label="Converted")
     ax.hist(miss_pts, bins=bins, color=ACCENT[0], alpha=0.7, label="Dropped")
     ax.set_xlabel("Opponent % at d-throw")

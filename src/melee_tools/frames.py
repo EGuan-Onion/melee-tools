@@ -8,6 +8,7 @@ import pyarrow as pa
 from peppi_py import read_slippi
 
 from melee_tools.enums import character_name, character_name_external, stage_name
+from melee_tools.parse import parse_game
 
 
 def _arrow_to_numpy(arr: pa.Array) -> np.ndarray:
@@ -16,6 +17,29 @@ def _arrow_to_numpy(arr: pa.Array) -> np.ndarray:
         return arr.to_numpy(zero_copy_only=False)
     # For arrays with nulls, convert to pandas (which handles nullable dtypes)
     return arr.to_pandas().values
+
+
+def _safe_np(arr) -> np.ndarray | None:
+    """Convert a peppi_py PyArrow array to numpy, returning None if the array is None.
+
+    Use this instead of _arrow_to_numpy() when reading raw peppi_py game objects
+    from the training_data directory, where older Slippi formats leave some fields
+    as None (e.g. airborne, l_cancel, last_hit_by).
+
+    Args:
+        arr: A PyArrow array or None.
+
+    Returns:
+        numpy array, or None if arr is None or conversion fails.
+    """
+    if arr is None:
+        return None
+    try:
+        if arr.null_count == 0:
+            return arr.to_numpy(zero_copy_only=False)
+        return arr.to_pandas().values
+    except Exception:
+        return None
 
 
 def extract_player_frames(game, player_index: int, port_slot: int) -> pd.DataFrame:
@@ -116,7 +140,6 @@ def extract_frames(
     filepath = Path(filepath)
     game = read_slippi(str(filepath))
 
-    from melee_tools.parse import parse_game
     game_info = parse_game(filepath)
 
     active_players = [(i, p) for i, p in enumerate(game.start.players) if p is not None]

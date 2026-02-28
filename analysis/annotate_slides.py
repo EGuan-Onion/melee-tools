@@ -1,6 +1,6 @@
 """
 Annotate the 10Q charts as PowerPoint-style slides with insight callouts.
-Saves annotated versions to replays/outputs/10q/slides/
+Saves annotated versions to outputs/10q/slides/
 """
 
 import os
@@ -11,8 +11,8 @@ import matplotlib.patches as mpatches
 from matplotlib.image import imread
 from pathlib import Path
 
-SRC  = "replays/outputs/10q"
-OUT  = "replays/outputs/10q/slides"
+SRC  = "outputs/10q"
+OUT  = "outputs/10q/slides"
 os.makedirs(OUT, exist_ok=True)
 
 BG       = "#0d0d1a"
